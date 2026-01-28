@@ -1,5 +1,5 @@
 use magnus::Error;
-use magnus::{function, method, class, RModule, Module, Object};
+use magnus::{function, method, RModule, Module, Object, Ruby};
 
 use ::candle_core::Device as CoreDevice;
 use crate::ruby::Result;
@@ -101,7 +101,7 @@ impl Device {
         #[cfg(not(feature = "cuda"))]
         {
             return Err(Error::new(
-                magnus::exception::runtime_error(),
+                Ruby::get().unwrap().exception_runtime_error(),
                 "CUDA support not compiled in. Rebuild with CUDA available.",
             ));
         }
@@ -115,7 +115,7 @@ impl Device {
         #[cfg(not(feature = "metal"))]
         {
             return Err(Error::new(
-                magnus::exception::runtime_error(),
+                Ruby::get().unwrap().exception_runtime_error(),
                 "Metal support not compiled in. Rebuild on macOS.",
             ));
         }
@@ -139,7 +139,7 @@ impl Device {
                 #[cfg(not(feature = "cuda"))]
                 {
                     return Err(Error::new(
-                        magnus::exception::runtime_error(),
+                        Ruby::get().unwrap().exception_runtime_error(),
                         "CUDA support not compiled in. Rebuild with CUDA available.",
                     ));
                 }
@@ -161,7 +161,7 @@ impl Device {
                 #[cfg(not(feature = "metal"))]
                 {
                     return Err(Error::new(
-                        magnus::exception::runtime_error(),
+                        Ruby::get().unwrap().exception_runtime_error(),
                         "Metal support not compiled in. Rebuild on macOS.",
                     ));
                 }
@@ -211,14 +211,15 @@ impl magnus::TryConvert for Device {
             "cpu" => Device::Cpu,
             "cuda" => Device::Cuda,
             "metal" => Device::Metal,
-            _ => return Err(Error::new(magnus::exception::arg_error(), "invalid device")),
+            _ => return Err(Error::new(Ruby::get().unwrap().exception_arg_error(), "invalid device")),
         };
         Ok(device)
     }
 }
 
 pub fn init(rb_candle: RModule) -> Result<()> {
-    let rb_device = rb_candle.define_class("Device", class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let rb_device = rb_candle.define_class("Device", ruby.class_object())?;
     rb_device.define_singleton_method("cpu", function!(Device::cpu, 0))?;
     rb_device.define_singleton_method("cuda", function!(Device::cuda, 0))?;
     rb_device.define_singleton_method("metal", function!(Device::metal, 0))?;

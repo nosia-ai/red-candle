@@ -86,16 +86,16 @@ impl ModelType {
 // Macro to extract parameters from Ruby hash to reduce boilerplate
 macro_rules! extract_param {
     // Basic parameter extraction
-    ($kwargs:expr, $config:expr, $param:ident) => {
-        if let Some(value) = $kwargs.get(magnus::Symbol::new(stringify!($param))) {
+    ($ruby:expr, $kwargs:expr, $config:expr, $param:ident) => {
+        if let Some(value) = $kwargs.get($ruby.to_symbol(stringify!($param))) {
             if let Ok(v) = TryConvert::try_convert(value) {
                 $config.$param = v;
             }
         }
     };
     // Optional parameter extraction (wraps in Some)
-    ($kwargs:expr, $config:expr, $param:ident, optional) => {
-        if let Some(value) = $kwargs.get(magnus::Symbol::new(stringify!($param))) {
+    ($ruby:expr, $kwargs:expr, $config:expr, $param:ident, optional) => {
+        if let Some(value) = $kwargs.get($ruby.to_symbol(stringify!($param))) {
             if let Ok(v) = TryConvert::try_convert(value) {
                 $config.$param = Some(v);
             }
@@ -111,23 +111,24 @@ pub struct GenerationConfig {
 
 impl GenerationConfig {
     pub fn new(kwargs: RHash) -> Result<Self> {
+        let ruby = Ruby::get().unwrap();
         let mut config = RustGenerationConfig::default();
-        
+
         // Extract basic parameters using macro
-        extract_param!(kwargs, config, max_length);
-        extract_param!(kwargs, config, temperature);
-        extract_param!(kwargs, config, top_p, optional);
-        extract_param!(kwargs, config, top_k, optional);
-        extract_param!(kwargs, config, repetition_penalty);
-        extract_param!(kwargs, config, repetition_penalty_last_n);
-        extract_param!(kwargs, config, seed);
-        extract_param!(kwargs, config, include_prompt);
-        extract_param!(kwargs, config, debug_tokens);
-        extract_param!(kwargs, config, stop_on_constraint_satisfaction);
-        extract_param!(kwargs, config, stop_on_match);
-        
+        extract_param!(ruby, kwargs, config, max_length);
+        extract_param!(ruby, kwargs, config, temperature);
+        extract_param!(ruby, kwargs, config, top_p, optional);
+        extract_param!(ruby, kwargs, config, top_k, optional);
+        extract_param!(ruby, kwargs, config, repetition_penalty);
+        extract_param!(ruby, kwargs, config, repetition_penalty_last_n);
+        extract_param!(ruby, kwargs, config, seed);
+        extract_param!(ruby, kwargs, config, include_prompt);
+        extract_param!(ruby, kwargs, config, debug_tokens);
+        extract_param!(ruby, kwargs, config, stop_on_constraint_satisfaction);
+        extract_param!(ruby, kwargs, config, stop_on_match);
+
         // Handle special cases that need custom logic
-        if let Some(value) = kwargs.get(magnus::Symbol::new("stop_sequences")) {
+        if let Some(value) = kwargs.get(ruby.to_symbol("stop_sequences")) {
             if let Ok(arr) = <RArray as TryConvert>::try_convert(value) {
                 config.stop_sequences = arr
                     .into_iter()
@@ -135,13 +136,13 @@ impl GenerationConfig {
                     .collect();
             }
         }
-        
-        if let Some(value) = kwargs.get(magnus::Symbol::new("constraint")) {
+
+        if let Some(value) = kwargs.get(ruby.to_symbol("constraint")) {
             if let Ok(constraint) = <&StructuredConstraint as TryConvert>::try_convert(value) {
                 config.constraint = Some(Arc::clone(&constraint.index));
             }
         }
-        
+
         Ok(Self { inner: config })
     }
 
@@ -204,19 +205,20 @@ impl GenerationConfig {
     
     /// Get all options as a hash
     pub fn options(&self) -> Result<RHash> {
-        let hash = RHash::new();
-        
+        let ruby = Ruby::get().unwrap();
+        let hash = ruby.hash_new();
+
         hash.aset("max_length", self.inner.max_length)?;
         hash.aset("temperature", self.inner.temperature)?;
-        
+
         if let Some(top_p) = self.inner.top_p {
             hash.aset("top_p", top_p)?;
         }
-        
+
         if let Some(top_k) = self.inner.top_k {
             hash.aset("top_k", top_k)?;
         }
-        
+
         hash.aset("repetition_penalty", self.inner.repetition_penalty)?;
         hash.aset("repetition_penalty_last_n", self.inner.repetition_penalty_last_n)?;
         hash.aset("seed", self.inner.seed)?;
@@ -225,11 +227,11 @@ impl GenerationConfig {
         hash.aset("debug_tokens", self.inner.debug_tokens)?;
         hash.aset("stop_on_constraint_satisfaction", self.inner.stop_on_constraint_satisfaction)?;
         hash.aset("stop_on_match", self.inner.stop_on_match)?;
-        
+
         if self.inner.constraint.is_some() {
             hash.aset("has_constraint", true)?;
         }
-        
+
         Ok(hash)
     }
 }
@@ -245,18 +247,18 @@ pub struct LLM {
 impl LLM {
     /// Create a new LLM from a pretrained model
     pub fn from_pretrained(model_id: String, device: Option<Device>) -> Result<Self> {
+        let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
         let device = device.unwrap_or(Device::best());
         let candle_device = device.as_device()?;
-        
-        // For now, we'll use tokio runtime directly
-        // In production, you might want to share a runtime
+
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create runtime: {}", e)))?;
-        
+            .map_err(|e| Error::new(runtime_error, format!("Failed to create runtime: {}", e)))?;
+
         // Determine model type from ID and whether it's quantized
         let model_lower = model_id.to_lowercase();
         let is_quantized = model_lower.contains("gguf") || model_lower.contains("-q4") || model_lower.contains("-q5") || model_lower.contains("-q8");
-        
+
         // Extract tokenizer source if provided in model_id (for both GGUF and regular models)
         let (model_id_clean, tokenizer_source) = if let Some(pos) = model_id.find("@@") {
             let (id, _tok) = model_id.split_at(pos);
@@ -266,17 +268,17 @@ impl LLM {
         };
 
         let model = if is_quantized {
-            
+
             // Use unified GGUF loader for all quantized models
             let gguf_model = rt.block_on(async {
                 RustQuantizedGGUF::from_pretrained(&model_id_clean, candle_device, tokenizer_source).await
             })
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to load GGUF model: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to load GGUF model: {}", e)))?;
             ModelType::QuantizedGGUF(gguf_model)
         } else {
             // Load non-quantized models based on type
             let model_lower_clean = model_id_clean.to_lowercase();
-            
+
             if model_lower_clean.contains("mistral") {
                 let mistral = if tokenizer_source.is_some() {
                     rt.block_on(async {
@@ -287,7 +289,7 @@ impl LLM {
                         RustMistral::from_pretrained(&model_id_clean, candle_device).await
                     })
                 }
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to load model: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to load model: {}", e)))?;
                 ModelType::Mistral(mistral)
             } else if model_lower_clean.contains("llama") || model_lower_clean.contains("meta-llama") || model_lower_clean.contains("tinyllama") {
                 let llama = if tokenizer_source.is_some() {
@@ -299,7 +301,7 @@ impl LLM {
                         RustLlama::from_pretrained(&model_id_clean, candle_device).await
                     })
                 }
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to load model: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to load model: {}", e)))?;
                 ModelType::Llama(llama)
             } else if model_lower_clean.contains("gemma") || model_lower_clean.contains("google/gemma") {
                 let gemma = if tokenizer_source.is_some() {
@@ -311,7 +313,7 @@ impl LLM {
                         RustGemma::from_pretrained(&model_id_clean, candle_device).await
                     })
                 }
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to load model: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to load model: {}", e)))?;
                 ModelType::Gemma(gemma)
             } else if model_lower_clean.contains("qwen") {
                 let qwen = if tokenizer_source.is_some() {
@@ -323,7 +325,7 @@ impl LLM {
                         RustQwen::from_pretrained(&model_id_clean, candle_device).await
                     })
                 }
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to load model: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to load model: {}", e)))?;
                 ModelType::Qwen(qwen)
             } else if model_lower_clean.contains("phi") {
                 let phi = if tokenizer_source.is_some() {
@@ -335,16 +337,16 @@ impl LLM {
                         RustPhi::from_pretrained(&model_id_clean, candle_device).await
                     })
                 }
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to load model: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to load model: {}", e)))?;
                 ModelType::Phi(phi)
             } else {
                 return Err(Error::new(
-                    magnus::exception::runtime_error(),
+                    runtime_error,
                     format!("Unsupported model type: {}. Currently Mistral, Llama, Gemma, Qwen, and Phi models are supported.", model_id_clean),
                 ));
             }
         };
-        
+
         Ok(Self {
             model: std::sync::Arc::new(std::sync::Mutex::new(RefCell::new(model))),
             model_id,
@@ -354,18 +356,19 @@ impl LLM {
 
     /// Generate text from a prompt
     pub fn generate(&self, prompt: String, config: Option<&GenerationConfig>) -> Result<String> {
+        let ruby = Ruby::get().unwrap();
         let config = config
             .map(|c| c.inner.clone())
             .unwrap_or_default();
-        
+
         let model = match self.model.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         let mut model_ref = model.borrow_mut();
-        
+
         model_ref.generate(&prompt, &config)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Generation failed: {}", e)))
+            .map_err(|e| Error::new(ruby.exception_runtime_error(), format!("Generation failed: {}", e)))
     }
 
     /// Generate text with streaming output
@@ -373,26 +376,27 @@ impl LLM {
         let config = config
             .map(|c| c.inner.clone())
             .unwrap_or_default();
-        
+
         let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
         let block = ruby.block_proc();
         if let Err(_) = block {
-            return Err(Error::new(magnus::exception::runtime_error(), "No block given"));
+            return Err(Error::new(runtime_error, "No block given"));
         }
         let block = block.unwrap();
-        
+
         let model = match self.model.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         let mut model_ref = model.borrow_mut();
-        
+
         let result = model_ref.generate_stream(&prompt, &config, |token| {
             // Call the Ruby block with each token
             let _ = block.call::<(String,), Value>((token.to_string(),));
         });
-        
-        result.map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Generation failed: {}", e)))
+
+        result.map_err(|e| Error::new(runtime_error, format!("Generation failed: {}", e)))
     }
 
     /// Get the model name
@@ -477,40 +481,41 @@ impl LLM {
     
     /// Apply chat template to messages
     pub fn apply_chat_template(&self, messages: RArray) -> Result<String> {
+        let ruby = Ruby::get().unwrap();
         // Convert Ruby array to JSON values
         let json_messages: Vec<serde_json::Value> = messages
             .into_iter()
             .filter_map(|msg| {
                 if let Ok(hash) = <RHash as TryConvert>::try_convert(msg) {
                     let mut json_msg = serde_json::Map::new();
-                    
-                    if let Some(role) = hash.get(magnus::Symbol::new("role")) {
+
+                    if let Some(role) = hash.get(ruby.to_symbol("role")) {
                         if let Ok(role_str) = <String as TryConvert>::try_convert(role) {
                             json_msg.insert("role".to_string(), serde_json::Value::String(role_str));
                         }
                     }
-                    
-                    if let Some(content) = hash.get(magnus::Symbol::new("content")) {
+
+                    if let Some(content) = hash.get(ruby.to_symbol("content")) {
                         if let Ok(content_str) = <String as TryConvert>::try_convert(content) {
                             json_msg.insert("content".to_string(), serde_json::Value::String(content_str));
                         }
                     }
-                    
+
                     Some(serde_json::Value::Object(json_msg))
                 } else {
                     None
                 }
             })
             .collect();
-        
+
         let model = match self.model.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
         };
         let model_ref = model.borrow();
-        
+
         model_ref.apply_chat_template(&json_messages)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to apply chat template: {}", e)))
+            .map_err(|e| Error::new(ruby.exception_runtime_error(), format!("Failed to apply chat template: {}", e)))
     }
     
     /// Get the model ID
@@ -520,7 +525,8 @@ impl LLM {
     
     /// Get model options
     pub fn options(&self) -> Result<RHash> {
-        let hash = RHash::new();
+        let ruby = Ruby::get().unwrap();
+        let hash = ruby.hash_new();
         
         // Basic metadata
         hash.aset("model_id", self.model_id.clone())?;
@@ -587,15 +593,19 @@ fn from_pretrained_wrapper(args: &[Value]) -> Result<LLM> {
             let device: Device = TryConvert::try_convert(args[1])?;
             LLM::from_pretrained(model_id, Some(device))
         },
-        _ => Err(Error::new(
-            magnus::exception::arg_error(),
-            "wrong number of arguments (expected 1..2)"
-        ))
+        _ => {
+            let ruby = Ruby::get().unwrap();
+            Err(Error::new(
+                ruby.exception_arg_error(),
+                "wrong number of arguments (expected 1..2)"
+            ))
+        }
     }
 }
 
 pub fn init_llm(rb_candle: RModule) -> Result<()> {
-    let rb_generation_config = rb_candle.define_class("GenerationConfig", magnus::class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let rb_generation_config = rb_candle.define_class("GenerationConfig", ruby.class_object())?;
     rb_generation_config.define_singleton_method("new", function!(GenerationConfig::new, 1))?;
     rb_generation_config.define_singleton_method("default", function!(GenerationConfig::default, 0))?;
     
@@ -613,7 +623,7 @@ pub fn init_llm(rb_candle: RModule) -> Result<()> {
     rb_generation_config.define_method("constraint", method!(GenerationConfig::constraint, 0))?;
     rb_generation_config.define_method("options", method!(GenerationConfig::options, 0))?;
     
-    let rb_llm = rb_candle.define_class("LLM", magnus::class::object())?;
+    let rb_llm = rb_candle.define_class("LLM", ruby.class_object())?;
     rb_llm.define_singleton_method("_from_pretrained", function!(from_pretrained_wrapper, -1))?;
     rb_llm.define_method("_generate", method!(LLM::generate, 2))?;
     rb_llm.define_method("_generate_stream", method!(LLM::generate_stream, 2))?;
