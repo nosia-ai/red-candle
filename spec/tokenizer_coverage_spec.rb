@@ -229,18 +229,19 @@ RSpec.describe "TokenizerCoverage" do
   end
   
   describe "advanced configuration" do
-    pending "chains padding and truncation configurations" do
-      # NOTE: Currently padding seems to override truncation in the Rust implementation
-      # When both are set, the padding length takes precedence
+    it "chains padding and truncation configurations" do
+      # The tokenizers pipeline is: encode -> truncate -> pad.
+      # So truncation caps the content tokens, then padding fills to
+      # the fixed length. With padding=128 and truncation=64 the
+      # output is always 128 (64 real tokens + 64 pad tokens).
       configured = bert_tokenizer
         .with_padding(length: 128)
         .with_truncation(64)
-      
+
       long_text = "word " * 100
       tokens = configured.encode(long_text)
-      
-      # Should be truncated to 64, but currently returns 128 (padding length)
-      expect(tokens.length).to be <= 64
+
+      expect(tokens.length).to eq(128)
     end
     
     it "handles vocabulary size queries" do
