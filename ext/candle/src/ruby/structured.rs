@@ -1,4 +1,4 @@
-use magnus::{Error, Module, RModule, function, Object};
+use magnus::{Error, Module, RModule, function, Object, Ruby};
 use std::sync::Arc;
 
 use crate::structured::{SchemaProcessor, VocabularyAdapter, Index, Vocabulary};
@@ -17,16 +17,16 @@ impl StructuredConstraint {
     pub fn from_schema_with_model(schema: String, model_id: String) -> Result<Self> {
         // Use tokio runtime for async vocabulary loading
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to create runtime: {}", e)))?;
 
         let vocabulary = rt.block_on(async {
             Vocabulary::from_pretrained(&model_id, None)
         })
-        .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create vocabulary from model '{}': {:?}", model_id, e)))?;
+        .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to create vocabulary from model '{}': {:?}", model_id, e)))?;
 
         let processor = SchemaProcessor::new();
         let index = processor.process_schema(&schema, &vocabulary)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to process schema: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to process schema: {}", e)))?;
 
         Ok(Self { index })
     }
@@ -35,16 +35,16 @@ impl StructuredConstraint {
     pub fn from_regex_with_model(pattern: String, model_id: String) -> Result<Self> {
         // Use tokio runtime for async vocabulary loading
         let rt = tokio::runtime::Runtime::new()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create runtime: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to create runtime: {}", e)))?;
 
         let vocabulary = rt.block_on(async {
             Vocabulary::from_pretrained(&model_id, None)
         })
-        .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create vocabulary from model '{}': {:?}", model_id, e)))?;
+        .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to create vocabulary from model '{}': {:?}", model_id, e)))?;
 
         let processor = SchemaProcessor::new();
         let index = processor.process_regex(&pattern, &vocabulary)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to process regex: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to process regex: {}", e)))?;
 
         Ok(Self { index })
     }
@@ -53,11 +53,11 @@ impl StructuredConstraint {
     /// Note: This may not handle all tokenizer byte encodings correctly
     pub fn from_schema(schema: String, tokenizer: &Tokenizer) -> Result<Self> {
         let vocabulary = VocabularyAdapter::from_tokenizer(&tokenizer.0)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create vocabulary: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to create vocabulary: {}", e)))?;
 
         let processor = SchemaProcessor::new();
         let index = processor.process_schema(&schema, &vocabulary)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to process schema: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to process schema: {}", e)))?;
 
         Ok(Self { index })
     }
@@ -66,18 +66,19 @@ impl StructuredConstraint {
     /// Note: This may not handle all tokenizer byte encodings correctly
     pub fn from_regex(pattern: String, tokenizer: &Tokenizer) -> Result<Self> {
         let vocabulary = VocabularyAdapter::from_tokenizer(&tokenizer.0)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create vocabulary: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to create vocabulary: {}", e)))?;
 
         let processor = SchemaProcessor::new();
         let index = processor.process_regex(&pattern, &vocabulary)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to process regex: {}", e)))?;
+            .map_err(|e| Error::new(Ruby::get().unwrap().exception_runtime_error(), format!("Failed to process regex: {}", e)))?;
 
         Ok(Self { index })
     }
 }
 
 pub fn init_structured(rb_candle: RModule) -> Result<()> {
-    let class = rb_candle.define_class("StructuredConstraint", magnus::class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let class = rb_candle.define_class("StructuredConstraint", ruby.class_object())?;
 
     // New methods using model_id for proper vocabulary loading
     class.define_singleton_method("from_schema_with_model", function!(StructuredConstraint::from_schema_with_model, 2))?;

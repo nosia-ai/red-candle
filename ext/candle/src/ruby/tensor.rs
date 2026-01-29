@@ -1,5 +1,5 @@
 use magnus::prelude::*;
-use magnus::{function, method, class, RModule, Module, Object};
+use magnus::{function, method, RModule, Module, Object, Ruby};
 
 use crate::ruby::{
     errors::wrap_candle_err,
@@ -84,7 +84,7 @@ impl Tensor {
                             Ok(f.to_f64() as i64)
                         } else {
                             Err(magnus::Error::new(
-                                magnus::exception::type_error(),
+                                Ruby::get().unwrap().exception_type_error(),
                                 "Cannot convert to i64"
                             ))
                         }
@@ -143,7 +143,7 @@ impl Tensor {
                 Ok(values)
             }
             _ => Err(magnus::Error::new(
-                magnus::exception::runtime_error(),
+                Ruby::get().unwrap().exception_runtime_error(),
                 "Tensor must be F32 dtype for values_f32",
             )),
         }
@@ -153,7 +153,7 @@ impl Tensor {
     pub fn item(&self) -> Result<f64> {
         if self.0.rank() != 0 {
             return Err(magnus::Error::new(
-                magnus::exception::runtime_error(),
+                Ruby::get().unwrap().exception_runtime_error(),
                 format!("item() can only be called on scalar tensors (rank 0), but tensor has rank {}", self.0.rank()),
             ));
         }
@@ -384,7 +384,7 @@ impl Tensor {
             let scalar = CoreTensor::from_vec(vec![i as f32], (1,), &self.0.device()).map_err(wrap_candle_err)?;
             Ok(Self(self.0.broadcast_div(&scalar).map_err(wrap_candle_err)?))
         } else {
-            Err(magnus::Error::new(magnus::exception::type_error(), "Right-hand side must be a Candle::Tensor, Float, or Integer"))
+            Err(magnus::Error::new(Ruby::get().unwrap().exception_type_error(), "Right-hand side must be a Candle::Tensor, Float, or Integer"))
         }
     }
 
@@ -650,7 +650,8 @@ impl Tensor {
 }
 
 pub fn init(rb_candle: RModule) -> Result<()> {
-    let rb_tensor = rb_candle.define_class("Tensor", class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let rb_tensor = rb_candle.define_class("Tensor", ruby.class_object())?;
     rb_tensor.define_singleton_method("new", function!(Tensor::new, 3))?;
     // rb_tensor.define_singleton_method("cat", function!(Tensor::cat, 2))?;
     // rb_tensor.define_singleton_method("stack", function!(Tensor::stack, 2))?;

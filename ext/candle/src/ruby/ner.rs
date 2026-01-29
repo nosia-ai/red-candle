@@ -1,4 +1,4 @@
-use magnus::{class, function, method, prelude::*, Error, RModule, RArray, RHash};
+use magnus::{function, method, prelude::*, Error, RModule, RArray, RHash, Ruby};
 use candle_transformers::models::bert::{BertModel, Config};
 use candle_core::{Device as CoreDevice, Tensor, DType, Module as CanModule};
 use candle_nn::{VarBuilder, Linear};
@@ -38,14 +38,14 @@ pub struct NER {
 impl NER {
     pub fn new(model_id: String, device: Option<Device>, tokenizer: Option<String>) -> Result<Self> {
         let device = device.unwrap_or(Device::best()).as_device()?;
-        
+
         let result = (|| -> std::result::Result<(BertModel, TokenizerWrapper, Linear, NERConfig), Box<dyn std::error::Error + Send + Sync>> {
             let api = Api::new()?;
             let repo = api.repo(Repo::new(model_id.clone(), RepoType::Model));
-            
+
             // Download model files
             let config_filename = repo.get("config.json")?;
-            
+
             // Handle tokenizer loading with optional tokenizer
             let tokenizer_wrapper = if let Some(tok_id) = tokenizer {
                 // Use the specified tokenizer
@@ -61,12 +61,12 @@ impl NER {
             };
             let weights_filename = repo.get("pytorch_model.safetensors")
                 .or_else(|_| repo.get("model.safetensors"))?;
-            
+
             // Load BERT config
             let config_str = std::fs::read_to_string(&config_filename)?;
             let config_json: serde_json::Value = serde_json::from_str(&config_str)?;
             let bert_config: Config = serde_json::from_value(config_json.clone())?;
-            
+
             // Extract NER label configuration
             let id2label = config_json["id2label"]
                 .as_object()
@@ -78,32 +78,32 @@ impl NER {
                     (id, label)
                 })
                 .collect::<HashMap<_, _>>();
-            
+
             let label2id = id2label.iter()
                 .map(|(id, label)| (label.clone(), *id))
                 .collect::<HashMap<_, _>>();
-            
+
             let num_labels = id2label.len();
             let ner_config = NERConfig { id2label, label2id };
-            
+
             // Load model weights
             let vb = unsafe {
                 VarBuilder::from_mmaped_safetensors(&[weights_filename], DType::F32, &device)?
             };
-            
+
             // Load BERT model
             let model = BertModel::load(vb.pp("bert"), &bert_config)?;
-            
+
             // Load classification head for token classification
             let classifier = candle_nn::linear(
                 bert_config.hidden_size,
                 num_labels,
                 vb.pp("classifier")
             )?;
-            
+
             Ok((model, tokenizer_wrapper, classifier, ner_config))
         })();
-        
+
         match result {
             Ok((model, tokenizer, classifier, config)) => {
                 Ok(Self {
@@ -115,63 +115,70 @@ impl NER {
                     model_id,
                 })
             }
-            Err(e) => Err(Error::new(
-                magnus::exception::runtime_error(),
-                format!("Failed to load NER model: {}", e)
-            )),
+            Err(e) => {
+                let ruby = Ruby::get().unwrap();
+                Err(Error::new(
+                    ruby.exception_runtime_error(),
+                    format!("Failed to load NER model: {}", e)
+                ))
+            },
         }
     }
-    
+
     /// Common tokenization and prediction logic
     fn tokenize_and_predict(&self, text: &str) -> Result<(tokenizers::Encoding, Vec<Vec<f32>>)> {
+        let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
+
         // Tokenize the text
         let encoding = self.tokenizer.inner().encode(text, true)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Tokenization failed: {}", e)))?;
-        
+            .map_err(|e| Error::new(runtime_error, format!("Tokenization failed: {}", e)))?;
+
         let token_ids = encoding.get_ids();
-        
+
         // Convert to tensors
         let input_ids = Tensor::new(token_ids, &self.device)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?
             .unsqueeze(0)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?; // Add batch dimension
-        
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?; // Add batch dimension
+
         let attention_mask = Tensor::ones_like(&input_ids)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?;
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?;
         let token_type_ids = Tensor::zeros_like(&input_ids)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?;
-        
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?;
+
         // Forward pass through BERT
         let output = self.model.forward(&input_ids, &token_type_ids, Some(&attention_mask))
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?;
-        
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?;
+
         // Apply classifier to get logits for each token
         let logits = self.classifier.forward(&output)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?;
-        
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?;
+
         // Apply softmax to get probabilities
         let probs = candle_nn::ops::softmax(&logits, 2)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?;
-        
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?;
+
         // Get predictions and confidence scores
         let probs_vec: Vec<Vec<f32>> = probs.squeeze(0)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?
             .to_vec2()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), e.to_string()))?;
-        
+            .map_err(|e| Error::new(runtime_error, e.to_string()))?;
+
         Ok((encoding, probs_vec))
     }
-    
+
     /// Extract entities from text with confidence scores
     pub fn extract_entities(&self, text: String, confidence_threshold: Option<f64>) -> Result<RArray> {
+        let ruby = Ruby::get().unwrap();
         let threshold = confidence_threshold.unwrap_or(0.9) as f32;
-        
+
         // Use common tokenization and prediction logic
         let (encoding, probs_vec) = self.tokenize_and_predict(&text)?;
-        
+
         let tokens = encoding.get_tokens();
         let offsets = encoding.get_offsets();
-        
+
         // Extract entities with BIO decoding
         let entities = self.decode_entities(
             &text,
@@ -180,33 +187,34 @@ impl NER {
             &probs_vec,
             threshold
         )?;
-        
+
         // Convert to Ruby array
-        let result = RArray::new();
+        let result = ruby.ary_new();
         for entity in entities {
-            let hash = RHash::new();
-            hash.aset(magnus::Symbol::new("text"), entity.text)?;
-            hash.aset(magnus::Symbol::new("label"), entity.label)?;
-            hash.aset(magnus::Symbol::new("start"), entity.start)?;
-            hash.aset(magnus::Symbol::new("end"), entity.end)?;
-            hash.aset(magnus::Symbol::new("confidence"), entity.confidence)?;
-            hash.aset(magnus::Symbol::new("token_start"), entity.token_start)?;
-            hash.aset(magnus::Symbol::new("token_end"), entity.token_end)?;
+            let hash = ruby.hash_new();
+            hash.aset(ruby.to_symbol("text"), entity.text)?;
+            hash.aset(ruby.to_symbol("label"), entity.label)?;
+            hash.aset(ruby.to_symbol("start"), entity.start)?;
+            hash.aset(ruby.to_symbol("end"), entity.end)?;
+            hash.aset(ruby.to_symbol("confidence"), entity.confidence)?;
+            hash.aset(ruby.to_symbol("token_start"), entity.token_start)?;
+            hash.aset(ruby.to_symbol("token_end"), entity.token_end)?;
             result.push(hash)?;
         }
-        
+
         Ok(result)
     }
-    
+
     /// Get token-level predictions with labels and confidence scores
     pub fn predict_tokens(&self, text: String) -> Result<RArray> {
+        let ruby = Ruby::get().unwrap();
         // Use common tokenization and prediction logic
         let (encoding, probs_vec) = self.tokenize_and_predict(&text)?;
-        
+
         let tokens = encoding.get_tokens();
-        
+
         // Build result array
-        let result = RArray::new();
+        let result = ruby.ary_new();
         for (i, (token, probs)) in tokens.iter().zip(probs_vec.iter()).enumerate() {
             // Find best label
             let (label_id, confidence) = probs.iter()
@@ -214,32 +222,32 @@ impl NER {
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                 .map(|(idx, conf)| (idx as i64, *conf))
                 .unwrap_or((0, 0.0));
-            
+
             let label = self.config.id2label.get(&label_id)
                 .unwrap_or(&"O".to_string())
                 .clone();
-            
-            let token_info = RHash::new();
+
+            let token_info = ruby.hash_new();
             token_info.aset("token", token.to_string())?;
             token_info.aset("label", label)?;
             token_info.aset("confidence", confidence)?;
             token_info.aset("index", i)?;
-            
+
             // Add probability distribution if needed
-            let probs_hash = RHash::new();
+            let probs_hash = ruby.hash_new();
             for (id, label) in &self.config.id2label {
                 if let Some(prob) = probs.get(*id as usize) {
                     probs_hash.aset(label.as_str(), *prob)?;
                 }
             }
             token_info.aset("probabilities", probs_hash)?;
-            
+
             result.push(token_info)?;
         }
-        
+
         Ok(result)
     }
-    
+
     /// Decode BIO-tagged sequences into entity spans
     fn decode_entities(
         &self,
@@ -251,33 +259,33 @@ impl NER {
     ) -> Result<Vec<EntitySpan>> {
         let mut entities = Vec::new();
         let mut current_entity: Option<(String, usize, usize, Vec<f32>)> = None;
-        
+
         for (i, (token, probs_vec)) in tokens.iter().zip(probs).enumerate() {
             // Skip special tokens
             if token.starts_with("[") && token.ends_with("]") {
                 continue;
             }
-            
+
             // Get predicted label
             let (label_id, confidence) = probs_vec.iter()
                 .enumerate()
                 .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
                 .map(|(idx, conf)| (idx as i64, *conf))
                 .unwrap_or((0, 0.0));
-            
+
             let label = self.config.id2label.get(&label_id)
                 .unwrap_or(&"O".to_string())
                 .clone();
-            
+
             // BIO decoding logic
             if label == "O" || confidence < threshold {
                 // End current entity if exists
                 if let Some((entity_type, start_idx, end_idx, confidences)) = current_entity.take() {
-                    if let (Some(start_offset), Some(end_offset)) = 
+                    if let (Some(start_offset), Some(end_offset)) =
                         (offsets.get(start_idx), offsets.get(end_idx - 1)) {
                         let entity_text = text[start_offset.0..end_offset.1].to_string();
                         let avg_confidence = confidences.iter().sum::<f32>() / confidences.len() as f32;
-                        
+
                         entities.push(EntitySpan {
                             text: entity_text,
                             label: entity_type,
@@ -292,11 +300,11 @@ impl NER {
             } else if label.starts_with("B-") {
                 // Begin new entity
                 if let Some((entity_type, start_idx, end_idx, confidences)) = current_entity.take() {
-                    if let (Some(start_offset), Some(end_offset)) = 
+                    if let (Some(start_offset), Some(end_offset)) =
                         (offsets.get(start_idx), offsets.get(end_idx - 1)) {
                         let entity_text = text[start_offset.0..end_offset.1].to_string();
                         let avg_confidence = confidences.iter().sum::<f32>() / confidences.len() as f32;
-                        
+
                         entities.push(EntitySpan {
                             text: entity_text,
                             label: entity_type,
@@ -308,7 +316,7 @@ impl NER {
                         });
                     }
                 }
-                
+
                 let entity_type = label[2..].to_string();
                 current_entity = Some((entity_type, i, i + 1, vec![confidence]));
             } else if label.starts_with("I-") {
@@ -329,14 +337,14 @@ impl NER {
                 }
             }
         }
-        
+
         // Handle final entity
         if let Some((entity_type, start_idx, end_idx, confidences)) = current_entity {
-            if let (Some(start_offset), Some(end_offset)) = 
+            if let (Some(start_offset), Some(end_offset)) =
                 (offsets.get(start_idx), offsets.get(end_idx - 1)) {
                 let entity_text = text[start_offset.0..end_offset.1].to_string();
                 let avg_confidence = confidences.iter().sum::<f32>() / confidences.len() as f32;
-                
+
                 entities.push(EntitySpan {
                     text: entity_text,
                     label: entity_type,
@@ -348,58 +356,60 @@ impl NER {
                 });
             }
         }
-        
+
         Ok(entities)
     }
-    
+
     /// Get the label configuration
     pub fn labels(&self) -> Result<RHash> {
-        let hash = RHash::new();
-        
-        let id2label = RHash::new();
+        let ruby = Ruby::get().unwrap();
+        let hash = ruby.hash_new();
+
+        let id2label = ruby.hash_new();
         for (id, label) in &self.config.id2label {
             id2label.aset(*id, label.as_str())?;
         }
-        
-        let label2id = RHash::new();
+
+        let label2id = ruby.hash_new();
         for (label, id) in &self.config.label2id {
             label2id.aset(label.as_str(), *id)?;
         }
-        
+
         hash.aset("id2label", id2label)?;
         hash.aset("label2id", label2id)?;
         hash.aset("num_labels", self.config.id2label.len())?;
-        
+
         Ok(hash)
     }
-    
+
     /// Get the tokenizer
     pub fn tokenizer(&self) -> Result<crate::ruby::tokenizer::Tokenizer> {
         Ok(crate::ruby::tokenizer::Tokenizer(self.tokenizer.clone()))
     }
-    
+
     /// Get model info
     pub fn model_info(&self) -> String {
         format!("NER model: {}, labels: {}", self.model_id, self.config.id2label.len())
     }
-    
+
     /// Get the model_id
     pub fn model_id(&self) -> String {
         self.model_id.clone()
     }
-    
+
     /// Get the device
     pub fn device(&self) -> Device {
         Device::from_device(&self.device)
     }
-    
+
     /// Get all options as a hash
     pub fn options(&self) -> Result<RHash> {
-        let hash = RHash::new();
+        let ruby = Ruby::get().unwrap();
+        let hash = ruby.hash_new();
         hash.aset("model_id", self.model_id.clone())?;
         hash.aset("device", self.device().__str__())?;
         hash.aset("num_labels", self.config.id2label.len())?;
-        
+
         // Add entity types as a list
         let entity_types: Vec<String> = self.config.label2id.keys()
             .filter(|l| *l != "O")
@@ -408,13 +418,14 @@ impl NER {
             .into_iter()
             .collect();
         hash.aset("entity_types", entity_types)?;
-        
+
         Ok(hash)
     }
 }
 
 pub fn init(rb_candle: RModule) -> Result<()> {
-    let ner_class = rb_candle.define_class("NER", class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let ner_class = rb_candle.define_class("NER", ruby.class_object())?;
     ner_class.define_singleton_method("new", function!(NER::new, 3))?;
     ner_class.define_method("extract_entities", method!(NER::extract_entities, 2))?;
     ner_class.define_method("predict_tokens", method!(NER::predict_tokens, 1))?;
@@ -424,6 +435,6 @@ pub fn init(rb_candle: RModule) -> Result<()> {
     ner_class.define_method("model_id", method!(NER::model_id, 0))?;
     ner_class.define_method("device", method!(NER::device, 0))?;
     ner_class.define_method("options", method!(NER::options, 0))?;
-    
+
     Ok(())
 }

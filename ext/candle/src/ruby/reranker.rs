@@ -1,4 +1,4 @@
-use magnus::{class, function, method, prelude::*, Error, RModule, Float, RArray};
+use magnus::{function, method, prelude::*, Error, RModule, RArray, RHash, Ruby};
 use candle_transformers::models::bert::{BertModel, Config};
 use candle_core::{Device as CoreDevice, Tensor, IndexOp, DType};
 use candle_nn::{VarBuilder, Linear, Module, ops::sigmoid};
@@ -25,6 +25,9 @@ impl Reranker {
     }
 
     fn new_with_core_device(model_id: String, device: CoreDevice, max_length: usize) -> std::result::Result<Self, Error> {
+        let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
+
         let result = (|| -> std::result::Result<(BertModel, TokenizerWrapper, Linear, Linear), Box<dyn std::error::Error + Send + Sync>> {
             let api = Api::new()?;
             let repo = api.repo(Repo::new(model_id.clone(), RepoType::Model));
@@ -64,50 +67,56 @@ impl Reranker {
             Ok((model, tokenizer, pooler, classifier)) => {
                 Ok(Self { model, tokenizer, pooler, classifier, device, model_id })
             }
-            Err(e) => Err(Error::new(magnus::exception::runtime_error(), format!("Failed to load model: {}", e))),
+            Err(e) => Err(Error::new(runtime_error, format!("Failed to load model: {}", e))),
         }
     }
 
     /// Extract CLS embeddings from the model output, handling Metal device workarounds
     fn extract_cls_embeddings(&self, embeddings: &Tensor) -> std::result::Result<Tensor, Error> {
+        let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
+
         let cls_embeddings = if self.device.is_metal() {
             // Metal has issues with tensor indexing, use a different approach
             let (batch_size, seq_len, hidden_size) = embeddings.dims3()
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to get dims: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to get dims: {}", e)))?;
 
             // Reshape to [batch * seq_len, hidden] then take first hidden vectors for each batch
             let reshaped = embeddings.reshape((batch_size * seq_len, hidden_size))
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to reshape: {}", e)))?;
+                .map_err(|e| Error::new(runtime_error, format!("Failed to reshape: {}", e)))?;
 
             // Extract CLS tokens (first token of each sequence)
             let mut cls_vecs = Vec::new();
             for i in 0..batch_size {
                 let start_idx = i * seq_len;
                 let cls_vec = reshaped.narrow(0, start_idx, 1)
-                    .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to extract CLS: {}", e)))?;
+                    .map_err(|e| Error::new(runtime_error, format!("Failed to extract CLS: {}", e)))?;
                 cls_vecs.push(cls_vec);
             }
 
             // Stack the CLS vectors
             Tensor::cat(&cls_vecs, 0)
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to cat CLS tokens: {}", e)))?
+                .map_err(|e| Error::new(runtime_error, format!("Failed to cat CLS tokens: {}", e)))?
         } else {
             embeddings.i((.., 0))
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to extract CLS token: {}", e)))?
+                .map_err(|e| Error::new(runtime_error, format!("Failed to extract CLS token: {}", e)))?
         };
 
         // Ensure tensor is contiguous for downstream operations
         cls_embeddings.contiguous()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to make CLS embeddings contiguous: {}", e)))
+            .map_err(|e| Error::new(runtime_error, format!("Failed to make CLS embeddings contiguous: {}", e)))
     }
 
-    pub fn debug_tokenization(&self, query: String, document: String) -> std::result::Result<magnus::RHash, Error> {
+    pub fn debug_tokenization(&self, query: String, document: String) -> std::result::Result<RHash, Error> {
+        let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
+
         // Create query-document pair for cross-encoder
         let query_doc_pair: EncodeInput = (query.clone(), document.clone()).into();
 
         // Tokenize using the inner tokenizer for detailed info
         let encoding = self.tokenizer.inner().encode(query_doc_pair, true)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Tokenization failed: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Tokenization failed: {}", e)))?;
 
         // Get token information
         let token_ids = encoding.get_ids().to_vec();
@@ -116,16 +125,18 @@ impl Reranker {
         let tokens = encoding.get_tokens().iter().map(|t| t.to_string()).collect::<Vec<_>>();
 
         // Create result hash
-        let result = magnus::RHash::new();
-        result.aset("token_ids", RArray::from_vec(token_ids.iter().map(|&id| id as i64).collect::<Vec<_>>()))?;
-        result.aset("token_type_ids", RArray::from_vec(token_type_ids.iter().map(|&id| id as i64).collect::<Vec<_>>()))?;
-        result.aset("attention_mask", RArray::from_vec(attention_mask.iter().map(|&mask| mask as i64).collect::<Vec<_>>()))?;
-        result.aset("tokens", RArray::from_vec(tokens))?;
+        let result = ruby.hash_new();
+        result.aset("token_ids", ruby.ary_from_vec(token_ids.iter().map(|&id| id as i64).collect::<Vec<_>>()))?;
+        result.aset("token_type_ids", ruby.ary_from_vec(token_type_ids.iter().map(|&id| id as i64).collect::<Vec<_>>()))?;
+        result.aset("attention_mask", ruby.ary_from_vec(attention_mask.iter().map(|&mask| mask as i64).collect::<Vec<_>>()))?;
+        result.aset("tokens", ruby.ary_from_vec(tokens))?;
 
         Ok(result)
     }
 
     pub fn rerank_with_options(&self, query: String, documents: RArray, pooling_method: String, apply_sigmoid: bool) -> std::result::Result<RArray, Error> {
+        let ruby = Ruby::get().unwrap();
+        let runtime_error = ruby.exception_runtime_error();
         let documents: Vec<String> = documents.to_vec()?;
 
         // Create query-document pairs for cross-encoder
@@ -136,7 +147,7 @@ impl Reranker {
 
         // Tokenize batch using inner tokenizer for access to token type IDs
         let encodings = self.tokenizer.inner().encode_batch(query_and_docs, true)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Tokenization failed: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Tokenization failed: {}", e)))?;
 
         // Convert to tensors
         let token_ids = encodings
@@ -150,15 +161,15 @@ impl Reranker {
             .collect::<Vec<_>>();
 
         let token_ids = Tensor::new(token_ids, &self.device)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create tensor: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to create tensor: {}", e)))?;
         let token_type_ids = Tensor::new(token_type_ids, &self.device)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create token type ids tensor: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to create token type ids tensor: {}", e)))?;
         let attention_mask = token_ids.ne(0u32)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to create attention mask: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to create attention mask: {}", e)))?;
 
         // Forward pass through BERT
         let embeddings = self.model.forward(&token_ids, &token_type_ids, Some(&attention_mask))
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Model forward pass failed: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Model forward pass failed: {}", e)))?;
 
         // Apply pooling based on the specified method
         let pooled_embeddings = match pooling_method.as_str() {
@@ -166,9 +177,9 @@ impl Reranker {
                 // Extract [CLS] token and apply pooler (dense + tanh)
                 let cls_embeddings = self.extract_cls_embeddings(&embeddings)?;
                 let pooled = self.pooler.forward(&cls_embeddings)
-                    .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Pooler forward failed: {}", e)))?;
+                    .map_err(|e| Error::new(runtime_error, format!("Pooler forward failed: {}", e)))?;
                 pooled.tanh()
-                    .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Tanh activation failed: {}", e)))?
+                    .map_err(|e| Error::new(runtime_error, format!("Tanh activation failed: {}", e)))?
             },
             "cls" => {
                 // Just use the [CLS] token embeddings directly (no pooler layer)
@@ -177,35 +188,35 @@ impl Reranker {
             "mean" => {
                 // Mean pooling across all tokens
                 let (_batch, seq_len, _hidden) = embeddings.dims3()
-                    .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to get tensor dimensions: {}", e)))?;
+                    .map_err(|e| Error::new(runtime_error, format!("Failed to get tensor dimensions: {}", e)))?;
                 let sum = embeddings.sum(1)
-                    .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to sum embeddings: {}", e)))?;
+                    .map_err(|e| Error::new(runtime_error, format!("Failed to sum embeddings: {}", e)))?;
                 (sum / (seq_len as f64))
-                    .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to compute mean: {}", e)))?
+                    .map_err(|e| Error::new(runtime_error, format!("Failed to compute mean: {}", e)))?
             },
-            _ => return Err(Error::new(magnus::exception::runtime_error(),
+            _ => return Err(Error::new(runtime_error,
                 format!("Unknown pooling method: {}. Use 'pooler', 'cls', or 'mean'", pooling_method)))
         };
 
         // Apply classifier to get relevance scores (raw logits)
         // Ensure tensor is contiguous before linear layer
         let pooled_embeddings = pooled_embeddings.contiguous()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to make pooled_embeddings contiguous: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to make pooled_embeddings contiguous: {}", e)))?;
         let logits = self.classifier.forward(&pooled_embeddings)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Classifier forward failed: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Classifier forward failed: {}", e)))?;
         let scores = logits.squeeze(1)
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to squeeze tensor: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to squeeze tensor: {}", e)))?;
 
         // Optionally apply sigmoid activation
         let scores = if apply_sigmoid {
             sigmoid(&scores)
-                .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Sigmoid failed: {}", e)))?
+                .map_err(|e| Error::new(runtime_error, format!("Sigmoid failed: {}", e)))?
         } else {
             scores
         };
 
         let scores_vec: Vec<f32> = scores.to_vec1()
-            .map_err(|e| Error::new(magnus::exception::runtime_error(), format!("Failed to convert scores to vec: {}", e)))?;
+            .map_err(|e| Error::new(runtime_error, format!("Failed to convert scores to vec: {}", e)))?;
 
         // Create tuples with document, score, and original index
         let mut ranked_docs: Vec<(String, f32, usize)> = documents
@@ -219,11 +230,11 @@ impl Reranker {
         ranked_docs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         // Build result array with [doc, score, doc_id]
-        let result_array = RArray::new();
+        let result_array = ruby.ary_new();
         for (doc, score, doc_id) in ranked_docs {
-            let tuple = RArray::new();
+            let tuple = ruby.ary_new();
             tuple.push(doc)?;
-            tuple.push(Float::from_f64(score as f64))?;
+            tuple.push(ruby.float_from_f64(score as f64))?;
             tuple.push(doc_id)?;
             result_array.push(tuple)?;
         }
@@ -246,8 +257,9 @@ impl Reranker {
     }
 
     /// Get all options as a hash
-    pub fn options(&self) -> std::result::Result<magnus::RHash, Error> {
-        let hash = magnus::RHash::new();
+    pub fn options(&self) -> std::result::Result<RHash, Error> {
+        let ruby = Ruby::get().unwrap();
+        let hash = ruby.hash_new();
         hash.aset("model_id", self.model_id.clone())?;
         hash.aset("device", self.device().__str__())?;
         Ok(hash)
@@ -255,7 +267,8 @@ impl Reranker {
 }
 
 pub fn init(rb_candle: RModule) -> std::result::Result<(), Error> {
-    let c_reranker = rb_candle.define_class("Reranker", class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let c_reranker = rb_candle.define_class("Reranker", ruby.class_object())?;
     c_reranker.define_singleton_method("_create", function!(Reranker::new, 3))?;
     c_reranker.define_method("rerank_with_options", method!(Reranker::rerank_with_options, 4))?;
     c_reranker.define_method("debug_tokenization", method!(Reranker::debug_tokenization, 2))?;

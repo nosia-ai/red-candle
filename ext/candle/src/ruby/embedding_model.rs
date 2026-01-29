@@ -13,7 +13,7 @@ use candle_transformers::models::{
     jina_bert::{BertModel as JinaBertModel, Config as JinaConfig},
     distilbert::{DistilBertModel, Config as DistilBertConfig}
 };
-use magnus::{class, function, method, prelude::*, Error, RModule, RHash};
+use magnus::{function, method, prelude::*, Error, RModule, RHash, Ruby};
 use std::path::Path;
 use serde_json;
 
@@ -103,28 +103,30 @@ impl EmbeddingModel {
     /// &RETURNS&: Tensor
     /// pooling_method: "pooled", "pooled_normalized", or "cls" (default: "pooled")
     pub fn embedding(&self, input: String, pooling_method: String) -> Result<Tensor> {
+        let ruby = Ruby::get().unwrap();
         match &self.0.model {
             Some(model) => {
                 match &self.0.tokenizer {
                     Some(tokenizer) => Ok(Tensor(self.compute_embedding(input, model, tokenizer, &pooling_method)?)),
-                    None => Err(magnus::Error::new(magnus::exception::runtime_error(), "Tokenizer not found"))
+                    None => Err(magnus::Error::new(ruby.exception_runtime_error(), "Tokenizer not found"))
                 }
             }
-            None => Err(magnus::Error::new(magnus::exception::runtime_error(), "Model not found"))
+            None => Err(magnus::Error::new(ruby.exception_runtime_error(), "Model not found"))
         }
     }
 
     /// Returns the unpooled embedding tensor ([1, SEQLENGTH, DIM]) for the input text
     /// &RETURNS&: Tensor
     pub fn embeddings(&self, input: String) -> Result<Tensor> {
+        let ruby = Ruby::get().unwrap();
         match &self.0.model {
             Some(model) => {
                 match &self.0.tokenizer {
                     Some(tokenizer) => Ok(Tensor(self.compute_embeddings(input, model, tokenizer)?)),
-                    None => Err(magnus::Error::new(magnus::exception::runtime_error(), "Tokenizer not found"))
+                    None => Err(magnus::Error::new(ruby.exception_runtime_error(), "Tokenizer not found"))
                 }
             }
-            None => Err(magnus::Error::new(magnus::exception::runtime_error(), "Model not found"))
+            None => Err(magnus::Error::new(ruby.exception_runtime_error(), "Model not found"))
         }
     }
 
@@ -165,7 +167,10 @@ impl EmbeddingModel {
                     },
                     Err(_) => None
                 };
-                inferred_emb_dim.ok_or_else(|| magnus::Error::new(magnus::exception::runtime_error(), "Could not infer embedding size from model file. Please specify embedding_size explicitly."))
+                inferred_emb_dim.ok_or_else(|| {
+                    let ruby = Ruby::get().unwrap();
+                    magnus::Error::new(ruby.exception_runtime_error(), "Could not infer embedding size from model file. Please specify embedding_size explicitly.")
+                })
             }
         }
     }
@@ -178,8 +183,9 @@ impl EmbeddingModel {
             EmbeddingModelType::JinaBert => {
                 let model_path = api.repo(repo).get("model.safetensors").map_err(wrap_hf_err)?;
                 if !std::path::Path::new(&model_path).exists() {
+                    let ruby = Ruby::get().unwrap();
                     return Err(magnus::Error::new(
-                        magnus::exception::runtime_error(),
+                        ruby.exception_runtime_error(),
                         "model.safetensors not found after download. Only safetensors models are supported. Please ensure your model repo contains model.safetensors."
                     ));
                 }
@@ -196,8 +202,9 @@ impl EmbeddingModel {
             EmbeddingModelType::StandardBert => {
                 let model_path = api.repo(repo).get("model.safetensors").map_err(wrap_hf_err)?;
                 if !std::path::Path::new(&model_path).exists() {
+                    let ruby = Ruby::get().unwrap();
                     return Err(magnus::Error::new(
-                        magnus::exception::runtime_error(),
+                        ruby.exception_runtime_error(),
                         "model.safetensors not found after download. Only safetensors models are supported. Please ensure your model repo contains model.safetensors."
                     ));
                 }
@@ -214,8 +221,9 @@ impl EmbeddingModel {
             EmbeddingModelType::DistilBert => {
                 let model_path = api.repo(repo.clone()).get("model.safetensors").map_err(wrap_hf_err)?;
                 if !std::path::Path::new(&model_path).exists() {
+                    let ruby = Ruby::get().unwrap();
                     return Err(magnus::Error::new(
-                        magnus::exception::runtime_error(),
+                        ruby.exception_runtime_error(),
                         "model.safetensors not found after download. Only safetensors models are supported. Please ensure your model repo contains model.safetensors."
                     ));
                 }
@@ -235,8 +243,9 @@ impl EmbeddingModel {
             EmbeddingModelType::MiniLM => {
                 let model_path = api.repo(repo.clone()).get("model.safetensors").map_err(wrap_hf_err)?;
                 if !std::path::Path::new(&model_path).exists() {
+                    let ruby = Ruby::get().unwrap();
                     return Err(magnus::Error::new(
-                        magnus::exception::runtime_error(),
+                        ruby.exception_runtime_error(),
                         "model.safetensors not found after download. Only safetensors models are supported. Please ensure your model repo contains model.safetensors."
                     ));
                 }
@@ -357,7 +366,10 @@ impl EmbeddingModel {
             "pooled" => Self::pooled_embedding(&result),
             "pooled_normalized" => Self::pooled_normalized_embedding(&result),
             "cls" => Self::pooled_cls_embedding(&result),
-            _ => Err(magnus::Error::new(magnus::exception::runtime_error(), "Unknown pooling method")),
+            _ => {
+                let ruby = Ruby::get().unwrap();
+                Err(magnus::Error::new(ruby.exception_runtime_error(), "Unknown pooling method"))
+            },
         }
     }
 
@@ -390,7 +402,10 @@ impl EmbeddingModel {
     pub fn tokenizer(&self) -> Result<crate::ruby::tokenizer::Tokenizer> {
         match &self.0.tokenizer {
             Some(tokenizer) => Ok(crate::ruby::tokenizer::Tokenizer(tokenizer.clone())),
-            None => Err(magnus::Error::new(magnus::exception::runtime_error(), "No tokenizer loaded for this model"))
+            None => {
+                let ruby = Ruby::get().unwrap();
+                Err(magnus::Error::new(ruby.exception_runtime_error(), "No tokenizer loaded for this model"))
+            }
         }
     }
     
@@ -409,7 +424,8 @@ impl EmbeddingModel {
     
     /// Get all options as a hash
     pub fn options(&self) -> Result<RHash> {
-        let hash = RHash::new();
+        let ruby = Ruby::get().unwrap();
+        let hash = ruby.hash_new();
         
         // Add model_id
         if let Some(model_id) = &self.0.model_id {
@@ -439,7 +455,8 @@ impl EmbeddingModel {
 }
 
 pub fn init(rb_candle: RModule) -> Result<()> {
-    let rb_embedding_model = rb_candle.define_class("EmbeddingModel", class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let rb_embedding_model = rb_candle.define_class("EmbeddingModel", ruby.class_object())?;
     rb_embedding_model.define_singleton_method("_create", function!(EmbeddingModel::new, 5))?;
     // Expose embedding with an optional pooling_method argument (default: "pooled")
     rb_embedding_model.define_method("_embedding", method!(EmbeddingModel::embedding, 2))?;

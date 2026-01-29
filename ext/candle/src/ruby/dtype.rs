@@ -1,5 +1,5 @@
 use magnus::value::ReprValue;
-use magnus::{method, class, RModule, Module};
+use magnus::{method, RModule, Module, Ruby};
 
 use ::candle_core::DType as CoreDType;
 use crate::ruby::Result;
@@ -30,7 +30,8 @@ impl DType {
 }
 
 pub fn init(rb_candle: RModule) -> Result<()> {
-    let rb_dtype = rb_candle.define_class("DType", class::object())?;
+    let ruby = Ruby::get().unwrap();
+    let rb_dtype = rb_candle.define_class("DType", ruby.class_object())?;
     rb_dtype.define_method("to_s", method!(DType::__str__, 0))?;
     rb_dtype.define_method("inspect", method!(DType::__repr__, 0))?;
     Ok(())
